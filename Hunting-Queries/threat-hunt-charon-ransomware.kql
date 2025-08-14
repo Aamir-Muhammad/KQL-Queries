@@ -1,0 +1,24 @@
+let DllSideLoad=DeviceImageLoadEvents
+| where InitiatingProcessVersionInfoOriginalFileName =~ "cookie_exporter.exe" and FileName in~ ("msedge.dll","TSMSISrv.dll","PulseBeaconX96311.dll") and InitiatingProcessParentFileName=~"cmd.exe";
+let RansomeDeploy=DeviceProcessEvents
+| where InitiatingProcessParentFileName=~ "cmd.exe" and InitiatingProcessVersionInfoOriginalFileName =~ "cookie_exporter.exe" and FileName =~"svchost.exe";
+let PayloadRead=DeviceFileEvents
+| where FileName contains "DumpStack.log"
+| where InitiatingProcessVersionInfoOriginalFileName =~ ("cookie_exporter.exe") or InitiatingProcessFileName =~ "Edge.exe"
+| where ActionType in ("FileModified","FileAccessed","FileRead");
+let RansomNote=DeviceFileEvents
+| where FileName =~ "How To Restore Your Files.txt" or FileName endswith ".Charon"
+| where ActionType in ("FileRenamed","FileCreated","FileModified");
+let ShadowCopyD=DeviceProcessEvents
+| where FileName in~ ("vssadmin.exe","wmic.exe","powershell.exe")
+| where ProcessCommandLine has_any ("delete shadows","shadowcopy");
+let sha1_iocs = dynamic(["92750eb5990cdcda768c7cb7b654ab54651c058a","a1c6090674f3778ea207b14b1b55be487ce1a2ab","21b233c0100948d3829740bd2d2d05dc35159ccb"]);
+let SHAHit=DeviceProcessEvents
+| where (tolower(SHA1) in~ (sha1_iocs));
+let ServiceCreation=DeviceRegistryEvents
+| where ActionType == "RegistryValueSet"
+| where RegistryValueName == "ImagePath"
+| where RegistryValueData contains @"\System32\Drivers\WWC.sys";
+union RansomeDeploy,DllSideLoad,PayloadRead,RansomNote,ShadowCopyD,SHAHit,ServiceCreation
+
+//https://www.trendmicro.com/en_dk/research/25/h/new-ransomware-charon.html
