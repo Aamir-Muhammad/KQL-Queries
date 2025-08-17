@@ -1,0 +1,13 @@
+let Domain=dynamic(["azureapplicationregistration.pages.dev","chikeukohandco.com","gmlygt.ru","haykovx.es","pw5.haykovx.es","rhisac.org","yrqwvevbjcfv.es"]);
+let MaliciousAppID=dynamic(["14b2864e-3cff-4d33-b5cd-7f14ca272ea4","85da47ec-2977-40ab-af03-f3d45aaab169","355d1228-1537-4e90-80a6-dae111bb4d70","6628b5b8-55af-42b4-9797-5cd5c148313c ","b0d8ea55-bc29-436c-9f8b-f8829030261d","22c606e8-7d68-4a09-89d9-c3c563a453a0","31c6b531-dd95-4361-93df-f5a9c906da39","055399fa-29b9-46ab-994d-4ae06f40bada","6a77659d-dd6f-4c73-a555-aed25926a05f","21f81c9e-475d-4c26-9308-1de74a286f73","987c259f-da29-4575-8072-96c610204830","db2eb385-c02f-44fc-b204-ade7d9f418b1","f99a0806-7650-4d78-acef-71e445dfc844","fdcf7337-92bf-4c70-9888-ea234b6ffb0d","fe0e32ca-d09e-4f80-af3c-5b086d4b8e66"]);
+let ClickEvents= union EmailUrlInfo,UrlClickEvents,MessageUrlInfo,MessageEvents,DeviceNetworkEvents
+|where RemoteUrl has_any (Domain) or Url has_any (Domain) or UrlChain has_any (Domain);
+let MaliciousAppEvents=union AADSignInEventsBeta ,AADSpnSignInEventsBeta 
+|where ApplicationId has_any (MaliciousAppID) or IPAddress =="2a00:b703:fff2:35::1" or tolower(UserAgent) contains @"axios/1.8.2" or tolower(UserAgent) contains @"axios/1.7.9";
+union MaliciousAppEvents,ClickEvents
+
+//chikeukohandco.com domain seems to be compromised, block TLD as per business needs.
+
+//Reference Articel
+//https://www.proofpoint.com/us/blog/threat-insight/microsoft-oauth-app-impersonation-campaign-leads-mfa-phishing
+//https://rhisac.org/threat-intelligence/microsoft-oauth-app-impersonation-leads-to-mfa-phishing/
