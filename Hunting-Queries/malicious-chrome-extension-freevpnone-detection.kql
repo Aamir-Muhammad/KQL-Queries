@@ -1,0 +1,16 @@
+let BrowserSchema=union DeviceTvmBrowserExtensions,DeviceTvmBrowserExtensionsKB
+|where ExtensionId =~"jcbiifklmgnkppebelchllpdbnibihel";
+let MaliciousExtensionID = DeviceFileEvents
+| where FileName endswith ".crx"
+| where FileName contains "jcbiifklmgnkppebelchllpdbnibihel"
+| summarize by FileName,InitiatingProcessFileName,DeviceName
+| summarize make_list(FileName) by InitiatingProcessFileName,DeviceName
+| summarize make_list(InitiatingProcessFileName) by DeviceName,tostring(list_FileName);
+let ExtensionC2CTraffic=DeviceNetworkEvents
+| where RemoteUrl has_any ("aitd.one","extrahefty.com","scan.aitd.one","freevpn.one");
+union ExtensionC2CTraffic,MaliciousExtensionID,BrowserSchema
+
+//If you have TVM License for DeviceTvmBrowserExtensions then BrowserSchema is enough to detect, those who dont have it , can utilise MaliciousExtensionID.
+
+//https://koi-security.webflow.io/blog/spyvpn-the-vpn-that-secretly-captures-your-screen
+//https://cyberinsider.com/chrome-vpn-extension-with-100k-installs-screenshots-all-sites-users-visit/
