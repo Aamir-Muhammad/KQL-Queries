@@ -1,0 +1,34 @@
+// Kimsuky JS Dropper Hunting Query
+let C2Domains = dynamic(["medianewsonline.com", "iuh234.medianewsonline.com"]);
+let SuspiciousPaths = dynamic(["%APPDATA%\\Microsoft\\Windows\\Themes\\Themes.js", "C:\\Users\\Public\\*.tmp", "%TEMP%\\*.tmp"]);
+let LOLBins = dynamic(["certutil.exe", "wscript.exe", "cscript.exe"]);
+let SuspiciousTasks = dynamic(["Windows Theme Manager"]);
+// Network to C2
+let NetworkHits = DeviceNetworkEvents
+| where RemoteUrl has_any (C2Domains) or RemoteUrl contains "dwnkl.php" or RemoteUrl contains "umprl.php"
+| where ActionType in ("ConnectionSuccess", "ConnectionAttemptFailed")
+| extend IndicatorType = "Network";
+// File Creation (Themes.js or .tmp files)
+let FileHits = DeviceFileEvents
+| where FileName =~ "Themes.js"
+| where FolderPath contains "APPDATA" or FolderPath contains "TEMP" or FolderPath contains "Public"
+| where ActionType == "FileCreated"
+| extend IndicatorType = "File";
+// Process Execution (LOLBins with suspicious args)
+let ProcessHits = DeviceProcessEvents
+| where FileName in~ (LOLBins)
+| where ProcessCommandLine has_any ("-decode","-encode", "Themes.js", "dwnkl.php", "umprl.php")
+| extend IndicatorType = "Process Certutil/Wscript/Cscript";
+// Process Execution (cmd spawn from Java)
+let CMDProcessHits = DeviceProcessEvents
+| where ProcessCommandLine has_any ("cmd /c systeminfo > ","cmd / c tasklist > ") or ProcessCommandLine has_all ("cmd /c cd /d"," > ") 
+| extend IndicatorType = "CMD /c arguments";
+// Scheduled Task Creation
+let TaskHits = DeviceEvents
+| where ActionType == "ScheduledTaskCreated"
+| where AdditionalFields has_any ("Windows Theme Manager", "Themes.js")
+| extend IndicatorType = "Task";
+NetworkHits
+| union FileHits , ProcessHits, CMDProcessHits, TaskHits
+| summarize by IndicatorType, DeviceName,InitiatingProcessParentFileName,InitiatingProcessFileName,FileName, AccountName,FolderPath, InitiatingProcessFolderPath, ProcessCommandLine,InitiatingProcessCommandLine, RemoteUrl, ActionType,SHA256,InitiatingProcessSHA256
+// https://blog.pulsedive.com/dissecting-the-infection-chain-technical-analysis-of-the-kimsuky-javascript-dropper/
