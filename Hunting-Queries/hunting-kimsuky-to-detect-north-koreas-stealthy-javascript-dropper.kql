@@ -32,3 +32,4 @@ NetworkHits
 | union FileHits , ProcessHits, CMDProcessHits, TaskHits
 | summarize by IndicatorType, DeviceName,InitiatingProcessParentFileName,InitiatingProcessFileName,FileName, AccountName,FolderPath, InitiatingProcessFolderPath, ProcessCommandLine,InitiatingProcessCommandLine, RemoteUrl, ActionType,SHA256,InitiatingProcessSHA256
 // https://blog.pulsedive.com/dissecting-the-infection-chain-technical-analysis-of-the-kimsuky-javascript-dropper/
+
