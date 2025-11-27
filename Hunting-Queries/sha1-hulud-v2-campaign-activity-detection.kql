@@ -41,7 +41,7 @@ DeviceProcessEvents
 // Linux destructive command
 | where (FileName =~ "bash" and ProcessCommandLine has "find" and ProcessCommandLine has "$HOME" and ProcessCommandLine has "shred" and ProcessCommandLine has "xargs" and ProcessCommandLine has "delete")
 // Windows destructive command
-or (InitiatingProcessFileName =~ "cmd.exe" and ProcessCommandLine has_all ("del", "/F", "/Q", "/S", "rd", "%USERPROFILE%"))
+or (InitiatingProcessFileName =~ "cmd.exe" and ProcessCommandLine has_all ("del", "/F", "/Q", "/S", "rd"))
 | extend Activity = "Destructive Command (Sha1-Hulud)", Tactic = "Impact", Technique = "T1485";
 // Union all indicators and summarize by device and user
 union file_indicators, process_indicators_preinstall, persistence_indicators, destructive_commands
@@ -58,3 +58,4 @@ union file_indicators, process_indicators_preinstall, persistence_indicators, de
     by DeviceId, DeviceName, AccountName, AccountDomain, bin(Timestamp, 1h)
 | extend Host = iif(isnotempty(AccountDomain), strcat(AccountDomain, "\\", AccountName), AccountName)
 | project-away DeviceId, AccountName, AccountDomain, Timestamp
+
