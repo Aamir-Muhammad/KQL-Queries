@@ -1,0 +1,60 @@
+
+// References: https://www.koi.ai/incident/live-updates-sha1-hulud-the-second-coming-hundred-npm-packages-compromised
+let lookback = 30d;
+// IOCs for malicious files associated with the campaign
+let malicious_hashes = dynamic([
+    "a3894003ad1d293ba96d77881ccd2071446dc3f65f434669b49b3da92421901a", // setup_bun.js
+    "62ee164b9b306250c1172583f138c9614139264f889fa99614903c12755468d0", // bun_environment.js
+    "f099c5d9ec417d4445a0328ac0ada9cde79fc37410914103ae9c609cbc0ee068", // bun_environment.js
+    "cbb9bc5a8496243e02f3cc080efbe3e4a1430ba0671f2e43a202bf45b05479cd"  // bun_environment.js
+]);
+let malicious_filenames = dynamic(["setup_bun.js", "bun_environment.js"]);
+// Part 1: Detect malicious file creation by hash or name
+let file_indicators =
+DeviceFileEvents
+| where Timestamp > ago(lookback)
+| where ActionType == "FileCreated"
+| where SHA256 in (malicious_hashes)
+    // FP Note: Searching by filename can be prone to FPs. This is scoped to paths containing ".npm" to reduce noise.
+    or (FileName in (malicious_filenames) and FolderPath contains ".npm")
+| extend Activity = "Malicious File Drop (Sha1-Hulud)", Tactic = "Execution", Technique = "T1204.002";
+// Part 2: Detect malicious preinstall script execution
+let process_indicators_preinstall =
+DeviceProcessEvents
+| where Timestamp > ago(lookback)
+| where ProcessCommandLine has "node" and ProcessCommandLine has "setup_bun.js"
+| extend Activity = "Malicious NPM Preinstall Script (Sha1-Hulud)", Tactic = "Execution", Technique = "T1059.007";
+// Part 3: Detect GitHub Actions persistence mechanism
+let persistence_indicators =
+DeviceFileEvents
+| where Timestamp > ago(lookback)
+| where ActionType == "FileCreated"
+// Look for the specific workflow file used for C2 or the runner installation in the hidden directory.
+// FP Note: Legitimate use of 'discussion.yaml' in a workflow or a '.dev-env' directory is possible but unlikely in this combination.
+| where (FolderPath has_all (".github", "workflows") and FileName =~ "discussion.yaml")
+    or (FolderPath contains "/.dev-env/" and FileName has_any ("run.sh", "config.sh"))
+| extend Activity = "GitHub Actions Persistence (Sha1-Hulud)", Tactic = "Persistence", Technique = "T1543.002";
+// Part 4: Detect destructive commands used as a fallback
+let destructive_commands =
+DeviceProcessEvents
+| where Timestamp > ago(lookback)
+// Linux destructive command
+| where (FileName =~ "bash" and ProcessCommandLine has "find" and ProcessCommandLine has "$HOME" and ProcessCommandLine has "shred" and ProcessCommandLine has "xargs" and ProcessCommandLine has "delete")
+// Windows destructive command
+or (InitiatingProcessFileName =~ "cmd.exe" and ProcessCommandLine has_all ("del", "/F", "/Q", "/S", "rd", "%USERPROFILE%"))
+| extend Activity = "Destructive Command (Sha1-Hulud)", Tactic = "Impact", Technique = "T1485";
+// Union all indicators and summarize by device and user
+union file_indicators, process_indicators_preinstall, persistence_indicators, destructive_commands
+| summarize
+    StartTime = min(Timestamp),
+    EndTime = max(Timestamp),
+    AllActivities = make_set(Activity, 10),
+    Tactics = make_set(Tactic, 10),
+    Techniques = make_set(Technique, 10),
+    FileNames = make_set(FileName),
+    FileHashes = make_set(SHA256),
+    CommandLines = make_set(ProcessCommandLine),
+    InitiatingCommandLines = make_set(InitiatingProcessCommandLine)
+    by DeviceId, DeviceName, AccountName, AccountDomain, bin(Timestamp, 1h)
+| extend Host = iif(isnotempty(AccountDomain), strcat(AccountDomain, "\\", AccountName), AccountName)
+| project-away DeviceId, AccountName, AccountDomain, Timestamp
