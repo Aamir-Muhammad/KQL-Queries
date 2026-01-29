@@ -1,0 +1,66 @@
+// Detection: Fake ClawdBot VS Code Extension Dropping ScreenConnect RAT
+// IOCs from Jan 2026 campaign (clawdbot.getintwopc.site → config.json → Code.exe → ScreenConnect client)
+// Covers network fetches, file writes/downloads, suspicious outbound, service creation, and temp-based execution
+// 1. Suspicious network activity (config.json, lightshot files, zoomupdate.msi from malicious domains or Dropbox fallback)
+let IOC=DeviceNetworkEvents
+    | where Timestamp > ago(30d)
+    | where RemoteUrl has_any ("clawdbot.getintwopc.site", "darkgptprivate.com", "getintwopc.site", "meeting.bulletmailer.net", "bulletmailer.net")
+       or RemoteUrl has "dropbox.com" and InitiatingProcessFileName has "Code.exe"   // fallback Dropbox delivery
+    | extend Activity = "Suspicious VS Code ext payload fetch (config/lightshot/zoomupdate)", Technique = "T1218.011 / T1566.002";
+    // 2. Known malicious hashes (Code.exe, DLLs, configs from campaign reports)
+let IOC2=DeviceFileEvents
+    | where SHA256 in~ (
+        "04ef48b104d6ebd05ad70f6685ade26c1905495456f52dfe0fb42f550bd43388",
+        "adbcdb613c04fd51936cb0863d2417604db0cd04792ab7cae02526d48944c77b",
+        "d1e0c26774cb8beabaf64f119652719f673fb530368d5b2166178191ad5fcbea",
+        "e20b920c7af988aa215c95bbaa365d005dd673544ab7e3577b60fecf11dcdea2"
+      )
+    | extend Activity = "Known ClawdBot/ScreenConnect dropper hash", Technique = "T1204.002";
+    // 3. Suspicious outbound to ScreenConnect C2 port 8041 (non-private IPs)
+let IOC3=DeviceNetworkEvents
+    | where (RemotePort == 8041 and not(ipv4_is_private(RemoteIP)) and RemoteIP != @"127.0.0.1") or (RemoteIP has_any ("178.16.54.253", "179.43.176.32"))   // known campaign IPs
+       or RemoteUrl has_any ("meeting.bulletmailer.net", "bulletmailer.net")
+    | extend Activity = "Outbound to weaponized ScreenConnect C2 (port 8041)", Technique = "T1071.001";
+    // 4. ScreenConnect service creation / start (often with random GUID like 083e4d30c7ea44f7)
+let Service=DeviceEvents
+    | where ActionType in ("ServiceInstalled", "ServiceStarted")
+    | where AdditionalFields has_any ("ScreenConnect", "ScreenConnect Client", "083e4d30c7ea44f7")
+    | extend Activity = "Suspicious ScreenConnect service install/start", Technique = "T1543.003";
+    // 5. Files written to \temp...ScreenConnect or Lightshot folders (common staging)
+let FileDropping=DeviceFileEvents
+    | where ActionType in ("FileCreated", "FileModified")
+    | where FolderPath has @"temp" and (FolderPath has "ScreenConnect")
+    | extend Activity = "ScreenConnect / Lightshot staging in %TEMP%", Technique = "T1218";
+    // 6. Code.exe or ScreenConnect processes launched from temp / unusual paths
+let ScreenconnectProcess=DeviceProcessEvents
+    | where FolderPath has @"temp"
+    | where FileName in~ ("Code.exe", "ScreenConnect.ClientService.exe", "ScreenConnect.WindowsClient.exe")
+    | extend Activity = "Code.exe / ScreenConnect executed from temp folder", Technique = "T1059.003";
+    // 7. Payload Downloading from Attacker Command And control
+let InitialDownload=DeviceFileEvents
+    | where (FileOriginUrl has_any ("clawdbot.getintwopc.site","darkgptprivate.com","getintwopc.site") and FileName has_any ("config.json","lightshot.dll","lightshot.exe"))
+     or 
+    (FileOriginUrl contains("dropbox") and FileName has_any ("zoomupdate.msi"))
+    | extend Activity = "ScreenConnect payload download", Technique = "T1218";
+union isfuzzy=true IOC,IOC2,IOC3,InitialDownload,Service,FileDropping,ScreenconnectProcess
+| where Timestamp > ago(30d)
+| project
+    Timestamp,
+    DeviceName, 
+    InitiatingProcessAccountName,
+    FileName,
+    FolderPath,
+    SHA256,
+    InitiatingProcessFileName,
+    InitiatingProcessCommandLine,
+   RemoteIP,
+   RemoteUrl,
+   RemotePort,
+    FileOriginUrl,
+    ActionType,
+   Activity,
+   Technique,
+    AdditionalFields
+| extend AlertTitle = strcat("ClawdBot VS Code Ext → ScreenConnect RAT Activity - ", Activity)
+| summarize arg_max(Timestamp, *) by DeviceName, AlertTitle, SHA256
+| order by Timestamp desc
