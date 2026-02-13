@@ -1,0 +1,23 @@
+let Extension=DeviceFileEvents
+| where FileName endswith ".crx" and FileName contains "cpcdkmjddocikjdkbbeiaafnpdbdafmi";
+let C2CTraffic=DeviceNetworkEvents
+| where RemoteUrl has_any ("nexsnield.com")
+or 
+RemoteIP has_any ("144.31.221.179","144.31.221.197","158.247.252.178","170.168.103.208","199.217.98.108","69.67.173.30");
+let MaliciousHash=DeviceProcessEvents
+| where SHA256 has_any ("01eba1d7222c6d298d81c15df1e71a492b6a3992705883c527720e5b0bab701a","37b547406735d94103906a7ade6e45a45b2f5755b9bff303ff29b9c2629aa3c5","3a5a31328d0729ea350e1eb5564ec9691492407f9213f00c1dd53062e1de3959","6461d8f680b84ff68634e993ed3c2c7f2c0cdc9cebb07ea8458c20462f8495aa","6f7c558ab1fad134cbc0508048305553a0da98a5f2f5ca2543bc3e958b79a6a3","c46af9ae6ab0e7567573dbc950a8ffbe30ea848fac90cd15860045fe7640199c","c76c0146407069fd4c271d6e1e03448c481f0970ddbe7042b31f552e37b55817");
+let LolBinFinger=DeviceProcessEvents
+| where InitiatingProcessCommandLine has_all ("cmd.exe","start","finger.exe","ct.exe") or ProcessCommandLine has_all ("cmd.exe","start","finger.exe","ct.exe");
+let MaliciousIP=DeviceNetworkEvents
+| where InitiatingProcessCommandLine has_all ("ct.exe","confirm")
+| distinct RemoteIP
+| join kind=inner DeviceNetworkEvents on RemoteIP;
+let PythonTTP=DeviceNetworkEvents
+| where InitiatingProcessCommandLine has_all ("pythonw.exe","modes.py")
+| where RemoteIP !in ("", "127.0.0.1");
+let RegistryRun=DeviceRegistryEvents
+| where InitiatingProcessCommandLine has_all ("pythonw.exe","modes.py");
+let Scheduletask=DeviceEvents
+| where ActionType == "ScheduledTaskCreated"
+| where InitiatingProcessCommandLine has_all ("run.exe", "udp.pyw");
+union Extension,C2CTraffic,LolBinFinger,MaliciousIP,MaliciousHash,PythonTTP,RegistryRun,Scheduletask
