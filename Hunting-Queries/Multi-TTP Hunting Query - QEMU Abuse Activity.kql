@@ -1,0 +1,69 @@
+// Title: Multi-TTP Hunting Query - QEMU Abuse & STAC4713 / STAC3725 Activity
+// - https://www.sophos.com/en-us/blog/qemu-abused-to-evade-detection-and-enable-ransomware-delivery
+let lookback = 30d;
+union isfuzzy=true
+(
+    DeviceProcessEvents
+    | where Timestamp > ago(lookback)
+    | extend TTP_Match = case(
+        // TTP 1: QEMU Virtualization Abuse
+        // Tuning: Very low FP expected. Ensure target extensions are strictly enforced if tuned.
+        (FileName =~ "qemu-system-x86_64.exe" or ProcessCommandLine has "qemu-system-x86_64") and (ProcessCommandLine contains ".db" or ProcessCommandLine contains ".dll" or ProcessCommandLine contains ".qcow2"), "TTP 1: QEMU Virtualization Abuse (Defense Evasion)",
+        // TTP 2: Malicious Scheduled Task 'TPMProfiler' (Process execution)
+        ProcessCommandLine has "TPMProfiler", "TTP 2: Scheduled Task TPMProfiler (Persistence)",
+        // TTP 3: Rogue Account / Service Creation via Command Line
+        // Tuning: 'AppMgmt' is a legitimate Windows service (Application Management). Filter by authorized admin usernames if needed.
+        ProcessCommandLine has "CtxAppVCOMService", "TTP 3: Rogue Account Creation (Persistence)",
+        (ProcessCommandLine has "sc " or ProcessCommandLine has "sc.exe") and ProcessCommandLine has "create" and ProcessCommandLine has "AppMgmt", "TTP 3: Rogue Service Creation (Persistence)",
+        // TTP 4: Port Forwarding and tunneling commands
+        ProcessCommandLine has_any ("32567", "22022") and ProcessCommandLine has_any ("ssh ", "portproxy", "forward"), "TTP 4: Port Forwarding/Tunneling Commands (C2)",
+        // TTP 5: Credential Access via vssuirun.exe or print copying NTDS.dit
+        // Tuning: vssuirun.exe can be used legitimately by admins for VSS management. Correlate with unexpected accounts.
+        FileName =~ "vssuirun.exe" or ProcessCommandLine has "vssuirun.exe", "TTP 5: NTDS.dit Extraction via VSS (Credential Access)",
+        ProcessCommandLine has "print" and ProcessCommandLine has "NTDS.dit", "TTP 5: NTDS.dit Extraction via Print (Credential Access)",
+        // TTP 6: Potential DLL Sideloading Context
+        // Tuning: ADNotificationManager is a native binary. Use this branch to correlate with ImageLoad events.
+        FileName =~ "ADNotificationManager.exe" and ProcessVersionInfoOriginalFileName !contains "ADNotificationManager" and isnotempty(ProcessVersionInfoOriginalFileName), "TTP 6: Potential DLL Sideloading Context (Defense Evasion)",
+        ""
+    )
+),
+(
+    DeviceEvents
+    | where Timestamp > ago(lookback)
+    | extend TTP_Match = case(
+        // TTP 2 & 3: Native Scheduled Task and User Creation events tracked via MDE DeviceEvents
+        ActionType in~ ("ScheduledTaskCreated", "ScheduledTaskUpdated") and (AdditionalFields has "TPMProfiler" or ProcessCommandLine has "TPMProfiler"), "TTP 2: Scheduled Task TPMProfiler Created (Persistence)",
+        ActionType =~ "UserAccountCreated" and AdditionalFields has "CtxAppVCOMService", "TTP 3: Rogue Account Creation (Persistence)",
+        ""
+    )
+),
+(
+    DeviceImageLoadEvents
+    | where Timestamp > ago(lookback)
+    | extend TTP_Match = case(
+        // TTP 6: DLL Sideloading vcruntime140_1.dll via ADNotificationManager.exe
+        InitiatingProcessFileName =~ "ADNotificationManager.exe" and FileName =~ "vcruntime140_1.dll" and SHA256 !="1f2d41c4aa5db0bc33ebf7b66d72943a817d7ce6cbe880502a9403823633093f", "TTP 6: DLL Sideloading vcruntime140_1.dll (Defense Evasion)",
+        "")
+),
+(
+DeviceNetworkEvents
+    | where Timestamp > ago(lookback)
+    | extend TTP_Match = case( RemoteIP has_any ("144.208.127.190","158.158.0.165","194.110.172.152","74.242.216.76","98.81.138.214") or RemoteUrl contains "vtps.us", "IOC: IP / Domain","")
+),
+(
+DeviceProcessEvents
+        | where Timestamp > ago(lookback)
+    |  extend TTP_Match = case(SHA256 has_any ("3a33b5bceb1eba4cc749534b03dd245f965d8f200aa02392baad78f5021a20ff","61c14c01460810f6f5f760daf8edbda82eea908b1a95052f8e0f9c4162c2900c","7ae413b76424508055154ee262c7567705dc1ac00607f5ac2e43d032221b34b3","a65f0144101d93656c5f9ad445b3993336e1f295a838351aeca6332c0949b463","c6b848c6a61685724fa9e2b3f6e3a118323ee0c165d1aa8c8a574205a4c4be59","f3194018d60645e43afabac33ceb4e852f95241b410cd726b1c40e3021589937")
+ or SHA1 has_any ("25e4d0eacff44f67a0a9d13970656cf76e5fd78c","66dc383e9e0852523fe50def0851b9268865f779","6c09b0d102361888daa7fa4f191f603a19af47cb","8c8e75dc4b4e1f201b56133a00fa9d1d711ccb50","903edad58d54f056bd94c8165cc20e105b054fa8")
+ or MD5 has_any ("6f55743091410dad6cdb0b7e474f03e7","b186baf2653c6c874e7b946647b048cc","b752ebfc1004f2c717609145e28243f3","f7a11aeaa4f0c748961bbebb2f9e12b6"), "IOC: Hashes","")
+)
+// Filter only positively matched TTP branches
+| where isnotempty(TTP_Match)
+// Coalesce standard fields for clean table output across the unioned tables
+| extend 
+    ComputerName = DeviceName,
+    User = coalesce(AccountName, InitiatingProcessAccountName),
+    ProcCommandLine = coalesce(ProcessCommandLine, InitiatingProcessCommandLine),
+    ImageFile = coalesce(FileName, InitiatingProcessFileName)
+| project-reorder Timestamp, TTP_Match, ComputerName, User, ActionType,ProcessVersionInfoOriginalFileName, ImageFile, ProcCommandLine, RemoteIP, RemotePort, LocalPort
+| sort by Timestamp desc
