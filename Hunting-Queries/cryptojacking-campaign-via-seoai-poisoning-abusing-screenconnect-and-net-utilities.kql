@@ -1,0 +1,171 @@
+// Campaign: Cryptojacking via SEO/AI-poisoning -> ScreenConnect -> .NET process hollowing (GPU mining)
+// Source : https://www.microsoft.com/en-us/security/blog/2026/05/26/poisoned-search-results-gpu-mining-cryptojacking-campaign-abusing-screenconnect-microsoft-net-utilities/
+//Author: Aamir Muhammad
+let lookback = 30d;
+//
+// Branch 1 : Suspicious binary execution from unusual dir 
+let Detection_RuntimeHostExecution =
+    DeviceProcessEvents
+    | where Timestamp > ago(lookback)
+    | where FileName =~ "RuntimeHost.exe"
+         or InitiatingProcessFileName =~ "RuntimeHost.exe"
+    | where (FolderPath has @"\Caches\D3F4E2A1")
+         or (InitiatingProcessFolderPath has @"\Caches\D3F4E2A1")
+    | extend TTP = "Execution / T1036 Masquerading - RuntimeHost.exe from Caches\\D3F4E2A1"
+    | project TTP, Timestamp, DeviceId, DeviceName, AccountName,
+              FileName, FolderPath, ProcessCommandLine,
+              ParentProcess     = InitiatingProcessFileName,
+              ParentProcessPath = InitiatingProcessFolderPath,
+              ParentProcessCmd  = InitiatingProcessCommandLine,
+              AdditionalFields  = dynamic(null);
+//
+// Branch 2 : Suspicious scheduled task creation 
+let Detection_ScheduledTask =
+    DeviceProcessEvents
+    | where Timestamp > ago(lookback)
+    | where FileName =~ "schtasks.exe"
+    | where ProcessCommandLine has "/create"
+    | where ProcessCommandLine has_any (
+        "Windows System Health Monitor",
+        "Windows System Health"
+      )
+    | extend TTP = "Persistence / T1053.005 Scheduled Task - 'Windows System Health*'"
+    | project TTP, Timestamp, DeviceId, DeviceName, AccountName,
+              FileName, FolderPath, ProcessCommandLine,
+              ParentProcess     = InitiatingProcessFileName,
+              ParentProcessPath = InitiatingProcessFolderPath,
+              ParentProcessCmd  = InitiatingProcessCommandLine,
+              AdditionalFields  = dynamic(null);
+//
+// Branch 3 : autorun.dll sideload -> silent MSIEXEC
+let SideloadingProcesses =
+    DeviceImageLoadEvents
+    | where Timestamp > ago(lookback)
+    | where FileName =~ "autorun.dll"
+    | where InitiatingProcessFolderPath has_any (
+        @"\Downloads\", @"\AppData\Local\Temp\", @"\AppData\Roaming\",
+        @"\ProgramData\", @"\Users\Public\", @"\Desktop\"
+      )
+    | where FolderPath has @"\sources\"
+    | project SideloadTime         = Timestamp, DeviceId, DeviceName,
+              LauncherProcessId    = InitiatingProcessId,
+              LauncherCreationTime = InitiatingProcessCreationTime,
+              LauncherName         = InitiatingProcessFileName,
+              LauncherPath         = InitiatingProcessFolderPath,
+              SideloadedDllPath    = FolderPath;
+let unique_devices = SideloadingProcesses | distinct DeviceId;
+let MsiSpawns =
+    DeviceProcessEvents
+    | where Timestamp > ago(lookback)
+    | where DeviceId in (unique_devices)
+    | where FileName =~ "msiexec.exe"
+    | where ProcessCommandLine has "/i"
+    | where ProcessCommandLine has "/quiet"
+    | project MsiSpawnTime         = Timestamp, DeviceId,
+              LauncherProcessId    = InitiatingProcessId,
+              LauncherCreationTime = InitiatingProcessCreationTime,
+              MsiCmd               = ProcessCommandLine,
+              MsiProcessId         = ProcessId;
+let Detection_SideloadMsi =
+    SideloadingProcesses
+    | join kind=inner MsiSpawns
+        on DeviceId, LauncherProcessId //, LauncherCreationTime
+    | where MsiSpawnTime between (SideloadTime .. (SideloadTime + 30m))
+    | extend TTP = "Defense Evasion / T1574.002 DLL Side-Loading + T1218.007 Msiexec - autorun.dll then silent MSI"
+    | project TTP,
+              Timestamp          = MsiSpawnTime,
+              DeviceId, DeviceName,
+              AccountName        = "",
+              FileName           = "msiexec.exe",
+              FolderPath         = SideloadedDllPath,
+              ProcessCommandLine = MsiCmd,
+              ParentProcess      = LauncherName,
+              ParentProcessPath  = LauncherPath,
+              ParentProcessCmd   = "",
+              AdditionalFields   = bag_pack(
+                  "SideloadTime",      SideloadTime,
+                  "SideloadedDllPath", SideloadedDllPath,
+                  "LauncherProcessId", LauncherProcessId,
+                  "MsiProcessId",      MsiProcessId);
+//
+// Branch 4 : Process hollowing into .NET utilities 
+let Detection_ProcessHollowing =
+    DeviceProcessEvents
+    | where Timestamp > ago(lookback)
+    | where FileName in~ (
+        "InstallUtil.exe", "RegAsm.exe", "RegSvcs.exe", "MSBuild.exe",
+        "AppLaunch.exe", "AddInProcess.exe", "aspnet_compiler.exe"
+      )
+    | where InitiatingProcessFileName in~ ("RuntimeHost.exe", "SimpleRunPE.exe", "vlc.exe")
+         or InitiatingProcessFolderPath has @"\Caches\D3F4E2A1"
+    | extend TTP = "Defense Evasion / T1055.012 Process Hollowing - .NET utility spawned by loader"
+    | project TTP, Timestamp, DeviceId, DeviceName, AccountName,
+              FileName, FolderPath, ProcessCommandLine,
+              ParentProcess     = InitiatingProcessFileName,
+              ParentProcessPath = InitiatingProcessFolderPath,
+              ParentProcessCmd  = InitiatingProcessCommandLine,
+              AdditionalFields  = dynamic(null);
+//
+// Branch 5 : Defender exclusion via Add-MpPreference 
+let Detection_DefenderExclusion =
+    DeviceProcessEvents
+    | where Timestamp > ago(lookback)
+    | where ProcessCommandLine has "Add-MpPreference"
+    | where ProcessCommandLine has_any ("ExclusionPath", "ExclusionProcess")
+    | extend TTP = "Defense Evasion / T1562.001 Impair Defenses - Defender exclusion via Add-MpPreference"
+    | project TTP, Timestamp, DeviceId, DeviceName, AccountName,
+              FileName, FolderPath, ProcessCommandLine,
+              ParentProcess     = InitiatingProcessFileName,
+              ParentProcessPath = InitiatingProcessFolderPath,
+              ParentProcessCmd  = InitiatingProcessCommandLine,
+              AdditionalFields  = dynamic(null);
+//
+// Branch 6 : RuntimeHost.lnk in the Startup folder 
+let Detection_StartupLnk =
+    DeviceFileEvents
+    | where Timestamp > ago(lookback)
+    | where FolderPath has @"\Start Menu\Programs\Startup"
+    | where FileName has "RuntimeHost" and FileName endswith ".lnk"
+    | extend TTP = "Persistence / T1547.009 Startup Folder - RuntimeHost.lnk"
+    | project TTP, Timestamp, DeviceId, DeviceName,
+              AccountName        = InitiatingProcessAccountName,
+              FileName, FolderPath,
+              ProcessCommandLine = "",
+              ParentProcess      = InitiatingProcessFileName,
+              ParentProcessPath  = InitiatingProcessFolderPath,
+              ParentProcessCmd   = InitiatingProcessCommandLine,
+              AdditionalFields   = dynamic(null);
+//
+// Branch 7 : Registry Run key (WinSysCache) 
+let Detection_RegistryRunKey =
+    DeviceRegistryEvents
+    | where Timestamp > ago(lookback)
+    | where RegistryKey has @"CurrentVersion\Run"
+    | where RegistryValueName =~ "WinSysCache"
+         or RegistryValueData has @"\Caches\D3F4E2A1"
+         or RegistryValueData has "RuntimeHost.exe"
+    | extend TTP = "Persistence / T1547.001 Registry Run Key - WinSysCache -> RuntimeHost.exe"
+    | project TTP, Timestamp, DeviceId, DeviceName,
+              AccountName        = InitiatingProcessAccountName,
+              FileName           = RegistryValueName,
+              FolderPath         = RegistryKey,
+              ProcessCommandLine = RegistryValueData,
+              ParentProcess      = InitiatingProcessFileName,
+              ParentProcessPath  = InitiatingProcessFolderPath,
+              ParentProcessCmd   = InitiatingProcessCommandLine,
+              AdditionalFields   = bag_pack(
+                  "RegistryKey",       RegistryKey,
+                  "RegistryValueName", RegistryValueName,
+                  "RegistryValueData", RegistryValueData,
+                  "ActionType",        ActionType);
+//
+// Combine all detections into a single result set
+union kind=outer
+    Detection_RuntimeHostExecution,
+    Detection_ScheduledTask,
+    Detection_SideloadMsi,
+    Detection_ProcessHollowing,
+    Detection_DefenderExclusion,
+    Detection_StartupLnk,
+    Detection_RegistryRunKey
+| sort by Timestamp desc
