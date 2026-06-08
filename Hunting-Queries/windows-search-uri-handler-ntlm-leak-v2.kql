@@ -1,0 +1,12 @@
+// https://www.huntress.com/blog/unpatched-ntlm-leak-windows-search-uri-handler
+// Auther= Aamir Muhammad
+let LookBack = 30d;
+let SearchURI = dynamic(["search:","search-ms:"]);
+let SearchURIParameters = dynamic(["query=","crumb="]);
+DeviceNetworkEvents
+| where Timestamp > ago(LookBack)
+| extend A=parse_json(AdditionalFields)
+|extend Host=todynamic(tostring(parse_json(A.host)))
+|extend Host=todynamic(tostring(parse_json(A.query)))
+| extend RemoteUrl=coalesce(RemoteUrl,Host)
+| where (RemoteUrl has_any(SearchURI) and RemoteUrl has_any(SearchURIParameters))
