@@ -1,0 +1,38 @@
+// EDRCHOKER - QoS Policy abuse targeting EDR/AV processes
+// Source: https://www.zerosalarium.com/2026/06/edrchoker-choking-telemetry-stream-block-edr.html
+// Author: Aamir Muhammad
+let EDRTools = @"(?i)(SenseIR|MsSense|MsMpEng|WinDefend|falcon-sensor|CSFalconService|SentinelService|SentinelAgent|CortexXDR|cyvera|pmsu|cb|carbonblack|edragent|HarfangLab|elastic-agent)\.exe";
+// QoS policy creation via process command line
+let ProcessAbuse =
+    DeviceProcessEvents
+    | where ProcessCommandLine matches regex @"(?i)New-NetQosPolicy|Set-NetQosPolicy"
+    | where ProcessCommandLine matches regex @"(?i)ThrottleRateActionBitsPerSecond|AppPathNameMatchCondition"
+    | where ProcessCommandLine matches regex EDRTools
+    | extend SuspectActivity = strcat("QoS Policy Creation via Process Command Line: ", ActionType)
+    | project Timestamp, DeviceName,
+              EventType   = ActionType,
+              SuspectActivity,
+              Account      = AccountName,
+              ActorProcess = FileName,
+              ActorCommandLine = ProcessCommandLine,
+              ProcessAncestry  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName, " > ", FileName),
+              ReportId;
+// QoS registry manipulation targeting EDR/AV binaries
+let RegistryAbuse =
+    DeviceRegistryEvents
+    | where RegistryKey contains @"\SOFTWARE\Policies\Microsoft\Windows\QoS"
+    | where RegistryValueData matches regex EDRTools
+    | extend SuspectActivity = strcat("QoS Registry Manipulation targeting: ", RegistryValueData)
+    | project Timestamp, DeviceName,
+              EventType   = ActionType,
+              SuspectActivity,
+              Account      = InitiatingProcessAccountName,
+              ActorProcess = InitiatingProcessFileName,
+              ActorCommandLine = InitiatingProcessCommandLine,
+              ProcessAncestry  = strcat(InitiatingProcessParentFileName, " > ", InitiatingProcessFileName);
+union ProcessAbuse, RegistryAbuse
+| summarize EventCount = count(),
+            FirstSeen  = min(Timestamp),
+            LastSeen   = max(Timestamp)
+        by DeviceName, EventType, SuspectActivity, Account, ActorProcess, ActorCommandLine, ProcessAncestry
+| order by LastSeen desc
