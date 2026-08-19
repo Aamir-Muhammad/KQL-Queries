@@ -4,8 +4,8 @@ let MaliciousExtensionID = DeviceFileEvents
 | where FileName endswith ".crx"
 | where FileName contains "jcbiifklmgnkppebelchllpdbnibihel"
 | summarize by FileName,InitiatingProcessFileName,DeviceName
-| summarize make_set(FileName) by InitiatingProcessFileName,DeviceName
-| summarize make_set(InitiatingProcessFileName) by DeviceName,tostring(list_FileName);
+| summarize File=make_set(FileName) by InitiatingProcessFileName,DeviceName
+| summarize make_set(InitiatingProcessFileName) by DeviceName,File;
 let ExtensionC2CTraffic=DeviceNetworkEvents
 | where RemoteUrl has_any ("aitd.one","extrahefty.com","scan.aitd.one","freevpn.one");
 union ExtensionC2CTraffic,MaliciousExtensionID,BrowserSchema
