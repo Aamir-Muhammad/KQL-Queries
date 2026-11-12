@@ -1,0 +1,176 @@
+// Detection Name: BITTER (TA397) - PapRAT / WmRAT Campaign - IOC + High-Fidelity TTP Hunt with Chain Correlation
+// Source: https://www.fortinet.com/blog/threat-research/bitter-expands-its-arsenal-with-paprat
+// MITRE ATT&CK: T1204.002, T1553.005, T1202, T1059.003, T1027, T1053.005, T1105, T1140, T1218.007, T1036.005, T1082, T1518.001, T1071.001, T1041
+// Author: Aamir Muhammad
+let LookBack = 30d;
+let TZ = "Asia/Dubai";
+let ToLocal = (t:datetime) { format_datetime(datetime_utc_to_local(t, TZ), "yyyy-MM-dd HH:mm:ss") };
+let ChainWin = 30m;
+let CampaignSHA256 = dynamic([
+    "411c0b9a2f98b927d806a685faf0c1ab1005647b4816157008892347fb88546b",
+    "569a21b519aaac8c92f653d708ab6ef34e3f38ea967f47e041d1e2425f6a4b33",
+    "a3081df333ca7f18bd90d10a45125ab5011dcf9d2806feae2935f09cab07da4c",
+    "ccefbdec2718d864d9d33c743aabfcef88a8d7904d1c598bfcf15cf5f3591c88",
+    "e3992f8c945b0761242377cba32d91b0a390c7cecd79478439843d93e6d2b76b",
+    "a16f17c204840df2b06c431887ad2f0c5b62b3c92cd601010b439f8715a7b24c",
+    "f1060a81c9f68d6f3d23e28f2a1af50fa18ecb9b0a763ca5dcd4b294b6a3593c"]);
+let C2IPs = dynamic(["185.244.151.84", "144.208.125.110", "46.19.143.157", "192.142.10.5", "84.252.95.216", "82.221.136.1", "176.123.0.199"]);
+let C2Terms = dynamic(["netmansrvdns", "rappellingaart", "gomescareerplans", "rivingtonclarks", "felixfuturenext", "goodnfortunes", "techtalkhelp", "chestergreenfarming"]);
+let C2Regex = @"(netmansrvdns|rappellingaart|gomescareerplans|rivingtonclarks|felixfuturenext|goodnfortunes|techtalkhelp|chestergreenfarming)\.com";
+let ImplantNames = dynamic(["bruzsvc.exe", "vnces.exe"]);
+let AnchorBins = dynamic(["ftp.exe", "curl.exe", "schtasks.exe", "msiexec.exe", "msg.exe", "bruzsvc.exe", "vnces.exe"]);
+let ShellSpawn = dynamic(["cmd.exe", "more.com", "curl.exe", "powershell.exe", "pwsh.exe", "conhost.exe", "schtasks.exe", "msg.exe", "msiexec.exe", "mshta.exe", "wscript.exe", "cscript.exe", "certutil.exe"]);
+let TrustedParents = dynamic(["ccmexec.exe", "ccmsetup.exe", "smsswd.exe", "sense.exe", "mpcmdrun.exe", "omadmclient.exe", "intunemanagementextension.exe", "agentexecutor.exe", "mdmdiagnosticstool.exe"]);
+let PrefilterTerms = dynamic(["icon.ico", "res.ico", "err.log", "talk.log", "abc.pdf", "securitycenter2", "headless", "microsoftupdates", "biosupdates",
+                              "frombase64string", "encodedcommand", "enc", "ec", "hacgam", "majilis", "visa_details", "imp_details", "ambassador", "invitation"]);
+let LureRegex = @"(hacgam|belt and road|majilis|nv-683|avn comd|invitation 2026\.url|visa_details\.msi|imp_details\.msi|attachment-2\.xls)";
+let StagedCmdRegex = @"(users\\public\\music\\err\.log|programdata\\talk\.log|appdata\\local\\abc\.pdf|>>?\s*abc\.pdf|file=@abc\.pdf)";
+let StagedPathRegex = @"(users\\public\\music\\err\.log|programdata\\talk\.log|appdata\\local\\abc\.pdf)$";
+let ProcHits = DeviceProcessEvents
+| where Timestamp > ago(LookBack)
+| where FileName in~ (AnchorBins)
+    or InitiatingProcessFileName in~ ("ftp.exe", "bruzsvc.exe", "vnces.exe")
+    or InitiatingProcessParentFileName in~ ("bruzsvc.exe", "vnces.exe")
+    or SHA256 in~ (CampaignSHA256) or InitiatingProcessSHA256 in~ (CampaignSHA256)
+    or ProcessCommandLine has_any (C2Terms)
+    or ProcessCommandLine has_any (PrefilterTerms)
+    or ProcessCommandLine contains "@ssl"
+    or ProcessCommandLine contains "c^m^d"
+    or ProcessCommandLine contains "^|^c"
+    or ProcessCommandLine contains ".msi"
+    or ProcessVersionInfoProductName has_any ("redistributables", "papsolutions")
+| extend Cmd = tolower(ProcessCommandLine), PCmd = tolower(InitiatingProcessCommandLine)
+| extend TaskName = tolower(extract(@'(?i)/tn\s+"?([^"\s]+)"?', 1, ProcessCommandLine))
+| extend TaskAction = tolower(extract(@'(?i)/tr\s+"([^"]+)"', 1, ProcessCommandLine))
+| extend HuntLogic = case(
+    SHA256 in~ (CampaignSHA256) or InitiatingProcessSHA256 in~ (CampaignSHA256), "BITTER_IOC_Hash_Execution",
+    Cmd matches regex C2Regex or PCmd matches regex C2Regex, "BITTER_IOC_C2Domain_In_CommandLine",
+    FileName in~ (ImplantNames) or ProcessVersionInfoOriginalFileName in~ (ImplantNames), "PapRAT_WmRAT_Implant_Execution",
+    ProcessVersionInfoProductName =~ "Microsoft redistributables" or ProcessVersionInfoProductName =~ "papsolutions", "PapRAT_Masqueraded_PE_Metadata",
+    InitiatingProcessFileName in~ (ImplantNames) or InitiatingProcessParentFileName in~ (ImplantNames), "PapRAT_WmRAT_Child_Process",
+    FileName =~ "ftp.exe" and (Cmd matches regex @"-s:\s*""?\S*\.ico" or Cmd has_any ("icon.ico", "res.ico")), "Ftp_Script_Execution_From_ICO",
+    InitiatingProcessFileName =~ "ftp.exe" and FileName in~ (ShellSpawn) and not(Cmd contains "0xffffffff -forcev1"), "Ftp_LOLBin_Shell_Escape_Spawn",
+    FileName =~ "conhost.exe" and Cmd contains "--headless" and Cmd matches regex @"\bmore\b", "Conhost_Headless_More_Pipe_Cmd",
+    FileName =~ "schtasks.exe" and Cmd has "create" and (Cmd contains @"microsoftupdates\" or Cmd contains @"biosupdates\"), "Bitter_Fake_Update_Task_Folder",
+    FileName =~ "schtasks.exe" and Cmd has "create" and TaskAction contains ".log" and TaskAction matches regex @"\|\s*c\^?m\^?d", "Schtasks_Task_Pipes_Log_To_Cmd",
+    FileName =~ "msiexec.exe" and Cmd matches regex @"\\\\[^\\\s]+@ssl(@\d+)?\\", "Msiexec_WebDAV_Remote_MSI_Install",
+    FileName =~ "cmd.exe" and Cmd matches regex @"\.msi""?\s*&\s*""?\S+\.(xls|xlsx|xlsm|doc|docx|pdf)", "LNK_MSI_Install_With_Decoy_Document",
+    FileName =~ "msg.exe" and Cmd contains "unable to open this file", "Fake_Explorer_Error_Popup_Lure",
+    Cmd contains "c^m^d" or Cmd matches regex @"\^\|\^c", "Caret_Obfuscated_Cmd_Pipe",
+    Cmd matches regex StagedCmdRegex, "Bitter_Staged_Log_Script_Reference",
+    FileName =~ "curl.exe" and (Cmd contains "--ssl-no-revoke" or Cmd matches regex @"(\?kq=|\?svr=|\?vid=|file=@abc\.pdf|-o\s+\S*talk\.log)"), "Curl_Bitter_C2_Beacon_Or_Exfil",
+    FileName =~ "ftp.exe" and InitiatingProcessFileName in~ ("explorer.exe", "winrar.exe", "7zfm.exe", "outlook.exe") and Cmd matches regex @"\s-s:", "Ftp_Script_Mode_Launched_By_User_Shell",
+    Cmd matches regex LureRegex or PCmd matches regex LureRegex, "Bitter_Lure_Filename_Execution",
+    FileName =~ "msiexec.exe" and Cmd matches regex @"/i\s+""?(https?://|\\\\\S*davwwwroot)" and Cmd matches regex @"/q(n|uiet)?\b" and InitiatingProcessFileName !in~ (TrustedParents), "Msiexec_Silent_Remote_URL_Install",
+    Cmd contains "securitycenter2" and Cmd contains "antivirusproduct", "Recon_AV_Enumeration_SecurityCenter2",
+    FileName in~ ("powershell.exe", "pwsh.exe") and Cmd matches regex @"frombase64string|\s-(ec|enc|encodedcommand)\s" and InitiatingProcessFileName !in~ (TrustedParents), "Staged_Base64_PowerShell_Decode",
+    FileName =~ "curl.exe" and Cmd matches regex @"(-o\s|--output)" and Cmd matches regex @"\.(msi|exe|dll|log|ico)\b", "Curl_Remote_Payload_Download",
+    "")
+| where isnotempty(HuntLogic)
+| extend HuntObject = case(
+    HuntLogic == "BITTER_IOC_Hash_Execution", strcat(SHA256, "\n", FolderPath),
+    HuntLogic in ("PapRAT_WmRAT_Implant_Execution", "PapRAT_Masqueraded_PE_Metadata"), strcat(FolderPath, "\n", ProcessVersionInfoCompanyName, " / ", ProcessVersionInfoProductName, " / ", ProcessVersionInfoProductVersion),
+    HuntLogic in ("Bitter_Fake_Update_Task_Folder", "Schtasks_Task_Pipes_Log_To_Cmd"), strcat("Task: ", TaskName, "\nAction: ", TaskAction),
+    ProcessCommandLine)
+| project Timestamp, DeviceId, DeviceName, LogSource = "DeviceProcessEvents", HuntLogic, HuntObject, AccountName, FileName, SHA256,
+    ProcessCommandLine, InitiatingProcessParentFileName, InitiatingProcessFileName, InitiatingProcessCommandLine;
+let NetHits = DeviceNetworkEvents
+| where Timestamp > ago(LookBack)
+| extend RemoteIP = replace_string(RemoteIP, "::ffff:", "")
+| where RemoteIP in (C2IPs) or RemoteUrl has_any (C2Terms)
+| where RemoteIP in (C2IPs) or tolower(RemoteUrl) matches regex C2Regex
+| project Timestamp, DeviceId, DeviceName, LogSource = "DeviceNetworkEvents",
+    HuntLogic = iff(RemoteIP in (C2IPs), "BITTER_IOC_C2_IP_Connection", "BITTER_IOC_C2_Domain_Connection"),
+    HuntObject = strcat(RemoteUrl, "\n", RemoteIP, ":", tostring(RemotePort), "\n", InitiatingProcessFolderPath),
+    AccountName = InitiatingProcessAccountName, FileName = strcat("→ ", coalesce(RemoteUrl, RemoteIP)), SHA256 = InitiatingProcessSHA256,
+    ProcessCommandLine = strcat(RemoteIP, ":", tostring(RemotePort)),
+    InitiatingProcessParentFileName, InitiatingProcessFileName, InitiatingProcessCommandLine;
+let DnsHits = DeviceEvents
+| where Timestamp > ago(LookBack)
+| where ActionType == "DnsQueryResponse"
+| where AdditionalFields has_any (C2Terms)
+| extend DnsQuery = tolower(tostring(parse_json(AdditionalFields).DnsQueryString))
+| where DnsQuery matches regex C2Regex
+| project Timestamp, DeviceId, DeviceName, LogSource = "DeviceEvents (DNS)", HuntLogic = "BITTER_IOC_C2_Domain_Resolution",
+    HuntObject = DnsQuery, AccountName = InitiatingProcessAccountName, FileName = strcat("DNS: ", DnsQuery), SHA256 = InitiatingProcessSHA256,
+    ProcessCommandLine = DnsQuery, InitiatingProcessParentFileName, InitiatingProcessFileName, InitiatingProcessCommandLine;
+let FileHits = DeviceFileEvents
+| where Timestamp > ago(LookBack)
+| where ActionType in ("FileCreated", "FileRenamed", "FileModified")
+| where SHA256 in~ (CampaignSHA256)
+    or FileName in~ (ImplantNames)
+    or FileName in~ ("err.log", "talk.log", "abc.pdf", "icon.ico", "res.ico", "visa_details.msi", "imp_details.msi", "attachment-2.xls", "invitation 2026.url")
+    or FileName endswith ".vhdx"
+| extend FP = tolower(FolderPath)
+| extend HuntLogic = case(
+    SHA256 in~ (CampaignSHA256), "BITTER_IOC_Hash_FileWrite",
+    FileName in~ (ImplantNames), "PapRAT_WmRAT_Implant_Dropped",
+    FP matches regex StagedPathRegex, "Bitter_Staged_Script_Artefact_Written",
+    FileName in~ ("visa_details.msi", "imp_details.msi", "attachment-2.xls", "invitation 2026.url"), "Bitter_Lure_Artefact_Written",
+    FileName in~ ("icon.ico", "res.ico") and FP matches regex @"\\(downloads|desktop|documents|temp|users\\public)\\", "Bitter_ICO_Script_Written_To_User_Path",
+    FileName endswith ".vhdx" and FP matches regex @"\\(downloads|desktop|documents|temp|appdata\\local\\microsoft\\windows\\inetcache|content\.outlook)\\", "VHDX_Lure_Written_To_User_Path",
+    "")
+| where isnotempty(HuntLogic)
+| project Timestamp, DeviceId, DeviceName, LogSource = "DeviceFileEvents", HuntLogic,
+    HuntObject = strcat(FolderPath, "\n", ActionType),
+    AccountName = InitiatingProcessAccountName, FileName = strcat("Write: ", FileName), SHA256,
+    ProcessCommandLine = FolderPath, InitiatingProcessParentFileName, InitiatingProcessFileName, InitiatingProcessCommandLine;
+let Findings = materialize(
+    union ProcHits, NetHits, DnsHits, FileHits
+    | extend ConfRank = case(
+        HuntLogic startswith "BITTER_IOC", 1,
+        HuntLogic in ("Ftp_Script_Execution_From_ICO", "Ftp_LOLBin_Shell_Escape_Spawn", "Conhost_Headless_More_Pipe_Cmd", "Bitter_Fake_Update_Task_Folder",
+                      "Schtasks_Task_Pipes_Log_To_Cmd", "Msiexec_WebDAV_Remote_MSI_Install", "Bitter_Staged_Log_Script_Reference", "Bitter_Staged_Script_Artefact_Written",
+                      "PapRAT_WmRAT_Implant_Execution", "PapRAT_WmRAT_Implant_Dropped", "PapRAT_Masqueraded_PE_Metadata", "PapRAT_WmRAT_Child_Process"), 2,
+        HuntLogic in ("Caret_Obfuscated_Cmd_Pipe", "Curl_Bitter_C2_Beacon_Or_Exfil", "LNK_MSI_Install_With_Decoy_Document", "Fake_Explorer_Error_Popup_Lure",
+                      "Ftp_Script_Mode_Launched_By_User_Shell", "Bitter_Lure_Filename_Execution", "Bitter_Lure_Artefact_Written", "Msiexec_Silent_Remote_URL_Install"), 3,
+        4)
+    | extend ChainStage = case(
+        HuntLogic in ("Ftp_Script_Execution_From_ICO", "Ftp_LOLBin_Shell_Escape_Spawn", "Ftp_Script_Mode_Launched_By_User_Shell", "Bitter_ICO_Script_Written_To_User_Path",
+                      "LNK_MSI_Install_With_Decoy_Document", "VHDX_Lure_Written_To_User_Path", "Bitter_Lure_Artefact_Written", "Bitter_Lure_Filename_Execution"), "1 Delivery",
+        HuntLogic in ("Bitter_Fake_Update_Task_Folder", "Schtasks_Task_Pipes_Log_To_Cmd"), "2 Persistence",
+        HuntLogic in ("Curl_Bitter_C2_Beacon_Or_Exfil", "Curl_Remote_Payload_Download", "Bitter_Staged_Script_Artefact_Written"), "3 Staging",
+        HuntLogic in ("Conhost_Headless_More_Pipe_Cmd", "Caret_Obfuscated_Cmd_Pipe", "Bitter_Staged_Log_Script_Reference", "Staged_Base64_PowerShell_Decode"), "4 Staged Execution",
+        HuntLogic in ("Msiexec_WebDAV_Remote_MSI_Install", "Msiexec_Silent_Remote_URL_Install"), "5 MSI Install",
+        HuntLogic in ("Recon_AV_Enumeration_SecurityCenter2", "Fake_Explorer_Error_Popup_Lure"), "6 Recon / Lure",
+        HuntLogic in ("PapRAT_WmRAT_Implant_Execution", "PapRAT_WmRAT_Implant_Dropped", "PapRAT_Masqueraded_PE_Metadata", "PapRAT_WmRAT_Child_Process",
+                      "BITTER_IOC_Hash_Execution", "BITTER_IOC_Hash_FileWrite"), "7 Implant",
+        "8 C2")
+    | extend ContextOnly = HuntLogic in ("Staged_Base64_PowerShell_Decode", "Curl_Remote_Payload_Download", "Recon_AV_Enumeration_SecurityCenter2",
+                                         "VHDX_Lure_Written_To_User_Path", "Bitter_ICO_Script_Written_To_User_Path"));
+let PrimaryDevices = Findings | where not(ContextOnly) | distinct DeviceId;
+let ChainCorrelation =
+    union
+    (Findings | extend Win = bin(Timestamp, ChainWin)),
+    (Findings | extend Win = bin(Timestamp + ChainWin / 2, ChainWin) - ChainWin / 2)
+    | summarize StageCount = dcount(ChainStage), StageSet = make_set(ChainStage, 10), WinFirst = min(Timestamp), WinLast = max(Timestamp) by DeviceId, Win
+    | summarize arg_max(StageCount, StageSet, WinFirst, WinLast) by DeviceId
+    | project DeviceId, ChainStageCount = StageCount, ChainStages = strcat_array(array_sort_asc(StageSet), " -> "),
+              ChainWindow = strcat(ToLocal(WinFirst), " to ", ToLocal(WinLast));
+Findings
+| where not(ContextOnly) or DeviceId in (PrimaryDevices)
+| lookup kind=leftouter ChainCorrelation on DeviceId
+| extend ConfRank = case(ChainStageCount >= 3 and ConfRank > 2, ConfRank - 1, ConfRank)
+| extend Confidence = case(ConfRank == 1, "1 - Critical (known BITTER IOC)", ConfRank == 2, "2 - Very High (campaign TTP)", ConfRank == 3, "3 - High (behavioural)", "4 - Medium (corroborating)")
+| extend ProcessTree = strcat(coalesce(InitiatingProcessParentFileName, "-"), "\n\t└ ", coalesce(InitiatingProcessFileName, "-"), "\n\t\t└ ", coalesce(FileName, "-"))
+| extend ProcessCommandLines = strcat(coalesce(InitiatingProcessCommandLine, "-"), "\n\t└ ", coalesce(ProcessCommandLine, "-"))
+| summarize FirstSeenUtc = min(Timestamp), LastSeenUtc = max(Timestamp), EventCount = count(),
+            HuntObjectSet = make_set(HuntObject, 15), ProcessTreeSet = make_set(ProcessTree, 8), CommandLineSet = make_set(ProcessCommandLines, 8),
+            SHA256Set = make_set_if(SHA256, isnotempty(SHA256), 5)
+    by DeviceName, AccountName, LogSource, HuntLogic, ChainStage, Confidence, ChainStageCount, ChainStages, ChainWindow
+| extend HuntObject = strcat_array(HuntObjectSet, "\n"),
+         ProcessTrees = split(strcat_array(ProcessTreeSet, "\n"), "\n"),
+         CommandLines = split(strcat_array(CommandLineSet, "\n"), "\n"),
+         Details = split(strcat("Stage: ", ChainStage,
+                                "\nChain on device: ", tostring(ChainStageCount), " stages",
+                                "\nChain window: ", ChainWindow,
+                                "\nSource: ", LogSource,
+                                "\nLast seen: ", ToLocal(LastSeenUtc),
+                                "\nEvents: ", tostring(EventCount)), "\n")
+| extend ProcessTrees = strcat_array(ProcessTrees, "\n"),
+         CommandLines = strcat_array(CommandLines, "\n"),
+         Details = strcat_array(Details, "\n"),
+         SHA256 = strcat_array(SHA256Set, "\n")
+| sort by ChainStageCount desc, Confidence asc, FirstSeenUtc desc
+| project FirstSeen = ToLocal(FirstSeenUtc), DeviceName, AccountName, Confidence, HuntLogic, ChainStages,
+          HuntObject, ProcessTrees, CommandLines, Details, SHA256
